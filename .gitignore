@@ -1,0 +1,77 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Frontend build artifacts
+node_modules/
+dist/
+build/
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
+.netlify/
+.vite/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Model weights and checkpoints
+models/
+checkpoints/
+runs/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Large datasets and generated data
+data/raw_papers/*
+data/datasets/*
+data/extracted/*
+data/eval/*
+
+# PDF and archive files
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Vector indexes and cache files
+*.faiss
+*.index
+cache/
+.cache/
+outputs/
+logs/
+*.log
+*.tmp
+*.temp
+
+# Notebook checkpoints
+.ipynb_checkpoints/

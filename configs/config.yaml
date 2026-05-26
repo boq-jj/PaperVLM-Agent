@@ -1,0 +1,36 @@
+project:
+  name: PaperVLM-Agent
+  seed: 42
+
+paths:
+  raw_papers_dir: data/raw_papers
+  extracted_text_dir: data/extracted/text
+  extracted_figures_dir: data/extracted/figures
+  extracted_pages_dir: data/extracted/pages
+  datasets_dir: data/datasets
+  eval_dir: data/eval
+  faiss_index_path: data/extracted/paper_index.faiss
+  metadata_path: data/extracted/index_metadata.json
+
+pdf:
+  render_dpi: 150
+  image_format: png
+  min_figure_width: 120
+  min_figure_height: 120
+
+rag:
+  embedding_model_name: sentence-transformers/all-MiniLM-L6-v2
+  chunk_size: 500
+  chunk_overlap: 80
+  top_k: 5
+
+vlm:
+  model_name: Qwen/Qwen2-VL-2B-Instruct
+  device: auto
+  max_new_tokens: 512
+  temperature: 0.2
+
+app:
+  host: 127.0.0.1
+  port: 7860
+  share: false

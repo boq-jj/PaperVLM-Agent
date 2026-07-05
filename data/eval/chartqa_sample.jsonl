@@ -1,0 +1,5 @@
+{"id":"chartqa_001","image_path":"data/datasets/chartqa/images/example_001.png","question":"Which method has the highest accuracy?","answer":"Method B","question_type":"comparison","source":"chartqa"}
+{"id":"chartqa_002","image_path":"data/datasets/chartqa/images/example_002.png","question":"What is the value for 2019?","answer":"42","question_type":"data_lookup","source":"chartqa"}
+{"id":"chartqa_003","image_path":"data/datasets/chartqa/images/example_003.png","question":"Is the value for Model A higher than Model C?","answer":"Yes","question_type":"comparison","source":"chartqa"}
+{"id":"chartqa_004","image_path":"data/datasets/chartqa/images/example_004.png","question":"What is the difference between the highest and lowest bars?","answer":"15","question_type":"arithmetic","source":"chartqa"}
+{"id":"chartqa_005","image_path":"data/datasets/chartqa/images/example_005.png","question":"Which category decreases from 2020 to 2021?","answer":"Category C","question_type":"trend","source":"chartqa"}

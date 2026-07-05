@@ -4,16 +4,17 @@ import {
   FileText,
   Image,
   Loader2,
-  MessageSquareText,
   Plus,
   Send,
   Settings2,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
 type Mode = "text" | "visual";
 type BackendStatus = "idle" | "processing" | "ready" | "error";
 type AnswerLanguage = "中文" | "English";
+type Role = "user" | "assistant";
 
 type RetrievedChunk = {
   rank?: number;
@@ -23,12 +24,30 @@ type RetrievedChunk = {
   preview?: string;
 };
 
+type ChatMessage = {
+  id: string;
+  role: Role;
+  mode?: Mode;
+  content: string;
+  evidence?: RetrievedChunk[];
+};
+
 type AskResponse = {
   answer?: string;
   retrieved_chunks?: RetrievedChunk[];
 };
 
-const API_BASE_URL = import.meta.env.VITE_PAPERVLM_API_BASE_URL?.replace(/\/$/, "") ?? "";
+const DEFAULT_API_BASE_URL = import.meta.env.VITE_PAPERVLM_API_BASE_URL?.replace(/\/$/, "") ?? "";
+
+class UserFacingError extends Error {
+  constructor(
+    message: string,
+    readonly detail = "",
+  ) {
+    super(message);
+    this.name = "UserFacingError";
+  }
+}
 
 const defaultTextSettings = {
   llmBackend: "qwen-vl",
@@ -55,16 +74,35 @@ function App() {
   const [statusText, setStatusText] = React.useState("");
   const [question, setQuestion] = React.useState("");
   const [mode, setMode] = React.useState<Mode>("text");
+  const [apiBaseUrl, setApiBaseUrl] = React.useState(() => {
+    return localStorage.getItem("papervlm_api_base_url") || DEFAULT_API_BASE_URL;
+  });
   const [textSettings, setTextSettings] = React.useState(defaultTextSettings);
   const [visualSettings, setVisualSettings] = React.useState(defaultVisualSettings);
-  const [answer, setAnswer] = React.useState("");
-  const [evidence, setEvidence] = React.useState<RetrievedChunk[]>([]);
+  const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [visualImage, setVisualImage] = React.useState<File | null>(null);
   const [isAsking, setIsAsking] = React.useState(false);
+  const [showSettings, setShowSettings] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const imageInputRef = React.useRef<HTMLInputElement | null>(null);
+  const chatEndRef = React.useRef<HTMLDivElement | null>(null);
 
   const hasPaper = Boolean(paperId);
+  const normalizedApiBaseUrl = apiBaseUrl.trim().replace(/\/$/, "");
+  const backendConnected = Boolean(normalizedApiBaseUrl);
+
+  React.useEffect(() => {
+    const value = apiBaseUrl.trim();
+    if (value) {
+      localStorage.setItem("papervlm_api_base_url", value);
+    } else {
+      localStorage.removeItem("papervlm_api_base_url");
+    }
+  }, [apiBaseUrl]);
+
+  React.useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, isAsking]);
 
   async function processPdf(file: File | null) {
     if (!file) return;
@@ -76,20 +114,28 @@ function App() {
 
     setStatus("processing");
     setPaperName(file.name);
+    setMessages([]);
     setStatusText("正在处理 PDF，生成文本块和检索索引...");
 
-    if (!API_BASE_URL) {
+    if (!backendConnected) {
       const demoPaperId = file.name.replace(/\.pdf$/i, "") || "uploaded_paper";
       setPaperId(demoPaperId);
       setStatus("ready");
       setStatusText(
         [
-          "前端演示模式已就绪。",
+          "已选择 PDF，但当前只部署了 Netlify 前端。",
           `paper_id: ${demoPaperId}`,
-          "当前未配置 VITE_PAPERVLM_API_BASE_URL，因此不会调用 Python 后端。",
-          "部署后可把该环境变量设置为后端 API 地址。",
+          "未配置后端 API 地址，因此无法解析 PDF、构建索引或生成真实回答。",
+          "请点击齿轮设置，填写 Python 后端 API 地址。",
         ].join("\n"),
       );
+      setMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "已收到 PDF 文件，但当前网页没有连接后端，所以不能执行论文解析和真实问答。请点击齿轮设置，填写 Python 后端 API 地址后再提问。",
+        },
+      ]);
       return;
     }
 
@@ -99,60 +145,84 @@ function App() {
       formData.append("chunk_size", "800");
       formData.append("chunk_overlap", "150");
 
-      const response = await fetch(`${API_BASE_URL}/api/process-pdf`, {
+      const response = await fetch(`${normalizedApiBaseUrl}/api/process-pdf`, {
         method: "POST",
         body: formData,
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw await buildApiError(response, "/api/process-pdf");
       }
+      ensureJsonResponse(response, "/api/process-pdf");
+
       const data = await response.json();
       setPaperId(data.paper_id ?? "");
       setStatus("ready");
       setStatusText(data.status ?? "PDF 处理完成。");
+      setMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "论文已处理完成。现在可以开始问答。",
+        },
+      ]);
     } catch (error) {
       setStatus("error");
-      setStatusText(`PDF 处理失败：${String(error)}`);
+      setStatusText(formatErrorForStatus(error));
     }
   }
 
   async function askQuestion() {
     const trimmedQuestion = question.trim();
     if (!hasPaper) {
-      setAnswer("请先上传并处理 PDF。");
-      return;
-    }
-    if (!trimmedQuestion) {
-      setAnswer("请输入问题。");
-      return;
-    }
-
-    setIsAsking(true);
-    setAnswer("正在生成回答...");
-    setEvidence([]);
-
-    if (!API_BASE_URL) {
-      setAnswer(
-        mode === "text"
-          ? `回答：这是前端演示回答。你问的是：“${trimmedQuestion}”。\n\n支持页码：请连接 Python 后端后查看真实检索页码。\n\n推理：Netlify 前端已完成，真实 PDF 解析、FAISS 检索和 Qwen 调用需要后端 API。`
-          : `回答：这是前端演示的视觉问答结果。\n\n支持页码：请连接 Python 后端后查看。\n\n视觉证据：${visualImage ? visualImage.name : "未上传图片，将由后端自动选择检索页截图。"}\n\n推理：图像理解需要后端调用 qwen3-vl-flash。`,
-      );
-      setEvidence([
+      setMessages([
         {
-          rank: 1,
-          score: 0.88,
-          chunk_id: "frontend_demo_chunk",
-          page_id: 1,
-          preview: "这里会显示 Python 后端返回的检索证据预览。",
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "请先上传并处理 PDF。",
         },
       ]);
-      setIsAsking(false);
+      return;
+    }
+    if (!trimmedQuestion) return;
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      mode,
+      content: trimmedQuestion,
+    };
+
+    setMessages((current) => [...current, userMessage]);
+    setQuestion("");
+    setIsAsking(true);
+
+    if (!backendConnected) {
+      window.setTimeout(() => {
+        setMessages((current) => [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            mode,
+            content: [
+              "当前无法生成真实回答。",
+              "",
+              "原因：Netlify 现在只部署了前端页面，尚未连接 PaperVLM-Agent 的 Python 后端。",
+              "",
+              "请点击齿轮设置，填写后端 API 地址，例如：",
+              "https://你的后端地址",
+            ].join("\n"),
+          },
+        ]);
+        setIsAsking(false);
+      }, 200);
       return;
     }
 
     try {
+      let response: Response;
       if (mode === "text") {
-        const response = await fetch(`${API_BASE_URL}/api/ask`, {
+        response = await fetch(`${normalizedApiBaseUrl}/api/ask`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -167,7 +237,6 @@ function App() {
             temperature: textSettings.temperature,
           }),
         });
-        await handleAskResponse(response);
       } else {
         const formData = new FormData();
         formData.append("paper_id", paperId);
@@ -179,26 +248,89 @@ function App() {
         formData.append("temperature", String(visualSettings.temperature));
         if (visualImage) formData.append("image", visualImage);
 
-        const response = await fetch(`${API_BASE_URL}/api/ask-visual`, {
+        response = await fetch(`${normalizedApiBaseUrl}/api/ask-visual`, {
           method: "POST",
           body: formData,
         });
-        await handleAskResponse(response);
       }
+
+      const data = await readAskResponse(response);
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          mode,
+          content: data.answer ?? "后端没有返回回答。",
+          evidence: data.retrieved_chunks ?? [],
+        },
+      ]);
     } catch (error) {
-      setAnswer(`回答失败：${String(error)}`);
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          mode,
+          content: formatErrorForChat(error),
+        },
+      ]);
     } finally {
       setIsAsking(false);
     }
   }
 
-  async function handleAskResponse(response: Response) {
+  async function readAskResponse(response: Response): Promise<AskResponse> {
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw await buildApiError(response, mode === "text" ? "/api/ask" : "/api/ask-visual");
     }
-    const data = (await response.json()) as AskResponse;
-    setAnswer(data.answer ?? "后端没有返回回答。");
-    setEvidence(data.retrieved_chunks ?? []);
+    ensureJsonResponse(response, mode === "text" ? "/api/ask" : "/api/ask-visual");
+    return (await response.json()) as AskResponse;
+  }
+
+  async function buildApiError(response: Response, endpoint: string): Promise<UserFacingError> {
+    const text = await response.text();
+    if (looksLikeHtml(text)) {
+      return new UserFacingError(
+        "后端地址不可用。请在齿轮设置中填写真正的 Python 后端地址，不要填写 Netlify 前端网址。",
+        `${endpoint} returned HTML, HTTP ${response.status}`,
+      );
+    }
+    return new UserFacingError(
+      "后端请求失败。请检查后端服务是否正在运行，以及接口是否允许跨域访问。",
+      text || `${endpoint} failed, HTTP ${response.status}`,
+    );
+  }
+
+  function ensureJsonResponse(response: Response, endpoint: string) {
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      throw new UserFacingError(
+        "后端返回格式不正确。请确认该地址是 PaperVLM-Agent Python 后端。",
+        `${endpoint} content-type=${contentType || "<empty>"}`,
+      );
+    }
+  }
+
+  function formatErrorForStatus(error: unknown) {
+    if (error instanceof UserFacingError) {
+      console.warn(error.detail);
+      return `PDF 处理失败。\n${error.message}`;
+    }
+    return `PDF 处理失败。\n${String(error)}`;
+  }
+
+  function formatErrorForChat(error: unknown) {
+    if (error instanceof UserFacingError) {
+      console.warn(error.detail);
+      return ["回答失败。", "", error.message].join("\n");
+    }
+    return `回答失败。\n${String(error)}`;
+  }
+
+  function looksLikeHtml(text: string) {
+    const trimmed = text.trim().toLowerCase();
+    return trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
   }
 
   function onDrop(event: React.DragEvent<HTMLDivElement>) {
@@ -207,7 +339,11 @@ function App() {
   }
 
   return (
-    <main className={hasPaper ? "app-shell ready" : "app-shell"} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+    <main
+      className={hasPaper ? "app-shell ready" : "app-shell"}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={onDrop}
+    >
       {!hasPaper && (
         <section className="hero">
           <h1>PaperVLM-Agent</h1>
@@ -216,9 +352,9 @@ function App() {
             question={question}
             setQuestion={setQuestion}
             mode={mode}
-            setMode={setMode}
             onAsk={askQuestion}
             onUpload={() => fileInputRef.current?.click()}
+            onSettings={() => setShowSettings(true)}
             isAsking={isAsking}
             disabled={!hasPaper}
           />
@@ -228,91 +364,48 @@ function App() {
 
       {hasPaper && (
         <>
-          <section className="workspace">
+          <section className="workspace chat-layout">
             <header className="workspace-header">
               <div>
                 <span className="eyebrow">当前论文</span>
                 <h2>{paperName || paperId}</h2>
               </div>
-              <pre className={`status compact ${status}`}>{statusText}</pre>
+              <div className="workspace-actions">
+                <button className="small-action" type="button" onClick={() => fileInputRef.current?.click()}>
+                  <Plus size={18} />
+                  更换 PDF
+                </button>
+              </div>
             </header>
 
-            <div className="qa-grid">
-              <Panel
-                active={mode === "text"}
-                icon={<MessageSquareText size={20} />}
-                title="文本问答"
-                onClick={() => setMode("text")}
-              >
-                <SettingsBlock title="文本问答设置">
-                  <SelectRow
-                    label="回答语言"
-                    value={textSettings.answerLanguage}
-                    options={["中文", "English"]}
-                    onChange={(value) =>
-                      setTextSettings({ ...textSettings, answerLanguage: value as AnswerLanguage })
-                    }
-                  />
-                  <SelectRow
-                    label="LLM 后端"
-                    value={textSettings.llmBackend}
-                    options={["qwen-vl", "mock"]}
-                    onChange={(value) => setTextSettings({ ...textSettings, llmBackend: value })}
-                  />
-                  <InputRow
-                    label="模型"
-                    value={textSettings.llmModelName}
-                    onChange={(value) => setTextSettings({ ...textSettings, llmModelName: value })}
-                  />
-                  <NumberRow
-                    label="top_k"
-                    value={textSettings.topK}
-                    onChange={(value) => setTextSettings({ ...textSettings, topK: value })}
-                  />
-                  <NumberRow
-                    label="上下文长度"
-                    value={textSettings.maxContextChars}
-                    onChange={(value) => setTextSettings({ ...textSettings, maxContextChars: value })}
-                  />
-                </SettingsBlock>
-              </Panel>
-
-              <Panel active={mode === "visual"} icon={<Image size={20} />} title="视觉问答" onClick={() => setMode("visual")}>
-                <SettingsBlock title="视觉问答设置">
-                  <SelectRow
-                    label="回答语言"
-                    value={visualSettings.answerLanguage}
-                    options={["中文", "English"]}
-                    onChange={(value) =>
-                      setVisualSettings({ ...visualSettings, answerLanguage: value as AnswerLanguage })
-                    }
-                  />
-                  <button className="image-picker" type="button" onClick={() => imageInputRef.current?.click()}>
-                    <Image size={18} />
-                    {visualImage ? visualImage.name : "可选：上传页面或图表图片"}
-                  </button>
-                  <NumberRow
-                    label="top_k"
-                    value={visualSettings.topK}
-                    onChange={(value) => setVisualSettings({ ...visualSettings, topK: value })}
-                  />
-                  <NumberRow
-                    label="上下文长度"
-                    value={visualSettings.maxContextChars}
-                    onChange={(value) => setVisualSettings({ ...visualSettings, maxContextChars: value })}
-                  />
-                </SettingsBlock>
-              </Panel>
-            </div>
-
-            <section className="answer-board">
+            <section className="chat-window">
+              <div className="chat-meta">
               <div>
-                <h3>回答</h3>
-                <pre>{answer || "上传论文并输入问题后，这里会显示回答。"}</pre>
+                <strong>{mode === "text" ? "文本问答" : "视觉问答"}</strong>
+                <span>
+                  {backendConnected
+                    ? mode === "text"
+                      ? `回答语言：${textSettings.answerLanguage}`
+                      : `回答语言：${visualSettings.answerLanguage}${visualImage ? ` · 图像：${visualImage.name}` : ""}`
+                    : "后端未连接，无法生成真实回答"}
+                </span>
               </div>
-              <div>
-                <h3>检索证据</h3>
-                <EvidenceList chunks={evidence} />
+                <FileText size={20} />
+              </div>
+
+              <div className="chat-messages">
+                {messages.map((message) => (
+                  <MessageBubble key={message.id} message={message} />
+                ))}
+                {isAsking && (
+                  <div className="message-row assistant">
+                    <div className="message-bubble">
+                      <Loader2 className="spin" size={18} />
+                      正在生成回答...
+                    </div>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
               </div>
             </section>
           </section>
@@ -322,14 +415,30 @@ function App() {
               question={question}
               setQuestion={setQuestion}
               mode={mode}
-              setMode={setMode}
               onAsk={askQuestion}
               onUpload={() => fileInputRef.current?.click()}
+              onSettings={() => setShowSettings(true)}
               isAsking={isAsking}
               disabled={false}
             />
           </footer>
         </>
+      )}
+
+      {showSettings && (
+        <SettingsDrawer
+          mode={mode}
+          setMode={setMode}
+          apiBaseUrl={apiBaseUrl}
+          setApiBaseUrl={setApiBaseUrl}
+          textSettings={textSettings}
+          setTextSettings={setTextSettings}
+          visualSettings={visualSettings}
+          setVisualSettings={setVisualSettings}
+          visualImage={visualImage}
+          onPickImage={() => imageInputRef.current?.click()}
+          onClose={() => setShowSettings(false)}
+        />
       )}
 
       <input
@@ -354,9 +463,9 @@ function Composer(props: {
   question: string;
   setQuestion: (value: string) => void;
   mode: Mode;
-  setMode: (value: Mode) => void;
   onAsk: () => void;
   onUpload: () => void;
+  onSettings: () => void;
   isAsking: boolean;
   disabled: boolean;
 }) {
@@ -376,14 +485,14 @@ function Composer(props: {
           }
         }}
       />
-      <div className="mode-switch">
-        <button className={props.mode === "text" ? "active" : ""} type="button" onClick={() => props.setMode("text")}>
-          文本
-        </button>
-        <button className={props.mode === "visual" ? "active" : ""} type="button" onClick={() => props.setMode("visual")}>
-          图像
-        </button>
-      </div>
+      <button
+        className="settings-button"
+        type="button"
+        aria-label="打开问答设置"
+        onClick={props.onSettings}
+      >
+        <Settings2 size={21} />
+      </button>
       <button className="send-button" type="button" onClick={props.onAsk} disabled={props.isAsking}>
         {props.isAsking ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
       </button>
@@ -391,36 +500,137 @@ function Composer(props: {
   );
 }
 
-function Panel(props: {
-  active: boolean;
-  icon: React.ReactNode;
-  title: string;
-  children: React.ReactNode;
-  onClick: () => void;
-}) {
+function MessageBubble({ message }: { message: ChatMessage }) {
   return (
-    <section className={props.active ? "panel active" : "panel"} onClick={props.onClick}>
-      <header>
-        <div className="panel-title">
-          {props.icon}
-          <h3>{props.title}</h3>
-        </div>
-        <span>{props.active ? "当前栏目" : "点击切换"}</span>
-      </header>
-      {props.active && props.children}
-    </section>
+    <div className={`message-row ${message.role}`}>
+      <div className="message-bubble">
+        {message.mode && <span className="message-mode">{message.mode === "text" ? "文本" : "图像"}</span>}
+        <pre>{message.content}</pre>
+        {message.evidence && message.evidence.length > 0 && <EvidenceList chunks={message.evidence} />}
+      </div>
+    </div>
   );
 }
 
-function SettingsBlock(props: { title: string; children: React.ReactNode }) {
+function SettingsDrawer(props: {
+  mode: Mode;
+  setMode: (value: Mode) => void;
+  apiBaseUrl: string;
+  setApiBaseUrl: (value: string) => void;
+  textSettings: typeof defaultTextSettings;
+  setTextSettings: (value: typeof defaultTextSettings) => void;
+  visualSettings: typeof defaultVisualSettings;
+  setVisualSettings: (value: typeof defaultVisualSettings) => void;
+  visualImage: File | null;
+  onPickImage: () => void;
+  onClose: () => void;
+}) {
   return (
-    <details className="settings" open>
-      <summary>
-        <Settings2 size={18} />
-        {props.title}
-      </summary>
-      <div className="settings-grid">{props.children}</div>
-    </details>
+    <div className="settings-overlay" onClick={props.onClose}>
+      <aside className="settings-drawer" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span className="eyebrow">问答设置</span>
+            <h3>配置当前对话</h3>
+          </div>
+          <button className="close-button" type="button" onClick={props.onClose} aria-label="关闭设置">
+            <X size={20} />
+          </button>
+        </header>
+
+        <div className="mode-card">
+          <button className={props.mode === "text" ? "active" : ""} type="button" onClick={() => props.setMode("text")}>
+            文本问答
+          </button>
+          <button className={props.mode === "visual" ? "active" : ""} type="button" onClick={() => props.setMode("visual")}>
+            视觉问答
+          </button>
+        </div>
+
+        <div className="settings-grid api-settings">
+          <InputRow
+            label="后端 API 地址"
+            value={props.apiBaseUrl}
+            onChange={props.setApiBaseUrl}
+          />
+          <p className="settings-hint">
+            例如：https://your-backend.example.com。这里必须填写 Python 后端地址，不要填写 Netlify 前端网址。
+            前端会自动调用 /api/process-pdf、/api/ask 和 /api/ask-visual。
+          </p>
+        </div>
+
+        {props.mode === "text" ? (
+          <div className="settings-grid">
+            <SelectRow
+              label="回答语言"
+              value={props.textSettings.answerLanguage}
+              options={["中文", "English"]}
+              onChange={(value) =>
+                props.setTextSettings({ ...props.textSettings, answerLanguage: value as AnswerLanguage })
+              }
+            />
+            <SelectRow
+              label="LLM 后端"
+              value={props.textSettings.llmBackend}
+              options={["qwen-vl", "mock"]}
+              onChange={(value) => props.setTextSettings({ ...props.textSettings, llmBackend: value })}
+            />
+            <InputRow
+              label="模型"
+              value={props.textSettings.llmModelName}
+              onChange={(value) => props.setTextSettings({ ...props.textSettings, llmModelName: value })}
+            />
+            <NumberRow
+              label="top_k"
+              value={props.textSettings.topK}
+              onChange={(value) => props.setTextSettings({ ...props.textSettings, topK: value })}
+            />
+            <NumberRow
+              label="上下文长度"
+              value={props.textSettings.maxContextChars}
+              onChange={(value) => props.setTextSettings({ ...props.textSettings, maxContextChars: value })}
+            />
+            <NumberRow
+              label="temperature"
+              value={props.textSettings.temperature}
+              step={0.1}
+              onChange={(value) => props.setTextSettings({ ...props.textSettings, temperature: value })}
+            />
+          </div>
+        ) : (
+          <div className="settings-grid">
+            <SelectRow
+              label="回答语言"
+              value={props.visualSettings.answerLanguage}
+              options={["中文", "English"]}
+              onChange={(value) =>
+                props.setVisualSettings({ ...props.visualSettings, answerLanguage: value as AnswerLanguage })
+              }
+            />
+            <button className="image-picker" type="button" onClick={props.onPickImage}>
+              <Image size={18} />
+              {props.visualImage ? props.visualImage.name : "可选：上传页面或图表图片"}
+            </button>
+            <NumberRow
+              label="top_k"
+              value={props.visualSettings.topK}
+              onChange={(value) => props.setVisualSettings({ ...props.visualSettings, topK: value })}
+            />
+            <NumberRow
+              label="上下文长度"
+              value={props.visualSettings.maxContextChars}
+              onChange={(value) => props.setVisualSettings({ ...props.visualSettings, maxContextChars: value })}
+            />
+            <NumberRow
+              label="temperature"
+              value={props.visualSettings.temperature}
+              step={0.1}
+              onChange={(value) => props.setVisualSettings({ ...props.visualSettings, temperature: value })}
+            />
+          </div>
+        )}
+      </aside>
+    </div>
   );
 }
 
@@ -453,12 +663,18 @@ function InputRow(props: { label: string; value: string; onChange: (value: strin
   );
 }
 
-function NumberRow(props: { label: string; value: number; onChange: (value: number) => void }) {
+function NumberRow(props: {
+  label: string;
+  value: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
   return (
     <label className="field">
       <span>{props.label}</span>
       <input
         type="number"
+        step={props.step ?? 1}
         value={props.value}
         onChange={(event) => props.onChange(Number(event.target.value))}
       />
@@ -467,10 +683,6 @@ function NumberRow(props: { label: string; value: number; onChange: (value: numb
 }
 
 function EvidenceList({ chunks }: { chunks: RetrievedChunk[] }) {
-  if (!chunks.length) {
-    return <p className="muted">暂无检索证据。</p>;
-  }
-
   return (
     <div className="evidence-list">
       {chunks.map((chunk, index) => (

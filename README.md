@@ -1,6 +1,6 @@
 # PaperVLM-Agent
 
-PaperVLM-Agent 是一个面向科研论文图表理解智能体原型。项目目标是结合 PDF 解析、图表抽取、RAG 检索和多模态大模型，让用户能够上传论文 PDF 或图表图片，并围绕论文内容、图表含义和实验结果进行问答。
+PaperVLM-Agent 是一个面向科研论文图表理解的多模态智能体原型。项目目标是结合 PDF 解析、图表抽取、RAG 检索和多模态大模型，让用户能够上传论文 PDF 或图表图片，并围绕论文内容、图表含义和实验结果进行问答。
 
 ## 项目背景
 
@@ -62,7 +62,7 @@ pip install -r requirements.txt
 
 ## 运行方式
 
-当前版本是项目基础结构和占位代码，核心算法会在后续步骤逐步实现。
+当前版本提供 PDF 解析、文本分块、FAISS 索引、命令行问答、Gradio Demo 和可供前端调用的 FastAPI 后端。
 
 解析 PDF：
 
@@ -73,19 +73,32 @@ python scripts/run_parse_pdf.py --pdf data/raw_papers/example.pdf
 构建 RAG 索引：
 
 ```bash
-python scripts/run_build_index.py
+python scripts/run_chunk_text.py --input data/extracted/text/example.json
+python scripts/run_build_index.py --chunks data/extracted/chunks/example_chunks.json
 ```
 
 命令行问答：
 
 ```bash
-python scripts/run_ask.py --question "What does Figure 1 show?"
+python scripts/run_ask.py --paper-id example --query "What does Figure 1 show?"
 ```
 
 启动 Gradio Demo：
 
 ```bash
 python scripts/run_demo.py
+```
+
+启动 REST API 后端：
+
+```bash
+python scripts/run_api.py --host 127.0.0.1 --port 8000
+```
+
+前端连接本地后端时，将 API 地址设为：
+
+```text
+http://127.0.0.1:8000
 ```
 
 ## 后续计划
@@ -137,57 +150,11 @@ If it still fails, you can temporarily use a qwen-api embedding backend or `text
 
 ## Evaluation
 
-PaperVLM-Agent includes a small text RAG evaluation set at:
+PaperVLM-Agent includes two lightweight evaluation paths: a self-built paper QA set for text RAG and a small ChartQA-compatible template for chart question answering. These evaluation outputs can be used in README summaries, reports, and experiment tables.
 
-```text
-data/eval/example_text_qa.jsonl
-```
+### 自建论文 QA 评测
 
-Each JSONL record contains:
-
-```json
-{
-  "id": "q001",
-  "paper_id": "example",
-  "question": "What is the Transformer architecture?",
-  "expected_pages": [2, 3],
-  "reference_answer": "A short reference answer.",
-  "question_type": "method"
-}
-```
-
-Run text RAG evaluation with the real LLM backend:
-
-```powershell
-python scripts\run_eval_text_rag.py --eval-file data\eval\example_text_qa.jsonl --paper-id example
-```
-
-If `DASHSCOPE_API_KEY` is not available, run the pipeline with the mock backend:
-
-```powershell
-python scripts\run_eval_text_rag.py --eval-file data\eval\example_text_qa.jsonl --paper-id example --llm-backend mock
-```
-
-The evaluator saves full results to:
-
-```text
-data/eval/results/example_text_qa_results.json
-```
-
-Current metrics include:
-
-- `success` / `failed`
-- `page_hit_rate`
-- `by_question_type`
-
-The evaluation output is designed for later manual scoring. Future fields can include:
-
-- `answer_correctness`
-- `evidence_support`
-- `hallucination`
-- `reasoning_quality`
-
-## Evaluation and Error Analysis
+`data/eval/example_text_qa.jsonl` contains 20 English QA examples for `example.pdf` (`Attention Is All You Need`). Each record includes `paper_id`, `question`, `expected_pages`, `reference_answer`, and `question_type`.
 
 Run the text RAG evaluation with the qwen-vl backend:
 
@@ -195,27 +162,184 @@ Run the text RAG evaluation with the qwen-vl backend:
 python scripts\run_eval_text_rag.py --eval-file data\eval\example_text_qa.jsonl --paper-id example --llm-backend qwen-vl
 ```
 
-Generate error analysis tables and a Markdown report from an existing result file:
+If `DASHSCOPE_API_KEY` is not available, run the same pipeline with the mock backend:
 
 ```powershell
-python scripts\run_error_analysis.py --eval-result data\eval\results\example_text_qa_results.json
+python scripts\run_eval_text_rag.py --eval-file data\eval\example_text_qa.jsonl --paper-id example --llm-backend mock
+```
+
+Output:
+
+```text
+data/eval/results/example_text_qa_results.json
+```
+
+Current text RAG metrics include:
+
+- `page_hit_rate`
+- `success`
+- `failed`
+- `by_question_type`
+
+### ChartQA 图表问答评测
+
+#### Synthetic ChartQA-style sample
+
+`data/eval/chartqa_sample.jsonl` is a small synthetic ChartQA-style template. It is generated locally and is used to verify that the image QA pipeline, matching logic, and error analysis work correctly. It is not an official ChartQA benchmark result.
+
+Put images under the paths referenced by `image_path`, for example:
+
+```text
+data/datasets/chartqa/images/example_001.png
+```
+
+For a reproducible local smoke test, generate five ChartQA-style sample charts:
+
+```powershell
+python scripts\create_chartqa_sample_images.py
+```
+
+Run ChartQA evaluation:
+
+```powershell
+python scripts\run_eval_chartqa.py --eval-file data\eval\chartqa_sample.jsonl
+```
+
+Output:
+
+```text
+data/eval/results/chartqa_sample_results.json
+```
+
+#### Official ChartQA Hugging Face subset
+
+For a more realistic small-scale chart QA evaluation, export a subset from `HuggingFaceM4/ChartQA`:
+
+```powershell
+python scripts/prepare_chartqa_hf_sample.py --num-samples 50
+```
+
+This creates:
+
+```text
+data/eval/chartqa_hf_sample.jsonl
+data/datasets/chartqa/images/chartqa_hf_000001.png
+```
+
+Run qwen-vl evaluation on the exported subset:
+
+```powershell
+python scripts/run_eval_chartqa.py --eval-file data/eval/chartqa_hf_sample.jsonl
+```
+
+Generate error analysis:
+
+```powershell
+python scripts/run_error_analysis.py --eval-result data/eval/results/chartqa_hf_sample_results.json --task-type chartqa
+```
+
+If Hugging Face download fails, check the network connection or set a mirror endpoint such as:
+
+```powershell
+$env:HF_ENDPOINT="https://hf-mirror.com"
+```
+
+You can still use the synthetic ChartQA-style sample first to validate the local pipeline.
+
+Current ChartQA metrics include:
+
+- `exact_match_rate`
+- `relaxed_match_rate`
+- `success`
+- `failed`
+- `by_question_type`
+
+### 错误分析
+
+Generate text RAG error analysis:
+
+```powershell
+python scripts\run_error_analysis.py --eval-result data\eval\results\example_text_qa_results.json --task-type text_rag
+```
+
+Generate ChartQA error analysis:
+
+```powershell
+python scripts\run_error_analysis.py --eval-result data\eval\results\chartqa_sample_results.json --task-type chartqa
 ```
 
 The analysis command does not call the LLM API and does not modify the original result file. It writes derived artifacts to `data/eval/analysis/`:
 
-- `example_text_qa_summary.md`
-- `example_text_qa_error_cases.jsonl`
-- `example_text_qa_table.csv`
-- `example_text_qa_by_type.csv`
+- `{stem}_summary.md`
+- `{stem}_error_cases.jsonl`
+- `{stem}_table.csv`
+- `{stem}_by_type.csv`
 
 Current error labels include:
 
-- `retrieval_miss`
-- `empty_answer`
-- `short_answer`
-- `low_top_score`
-- `runtime_error`
-- `possible_success`
+- text RAG: `retrieval_miss`, `low_top_score`, `empty_answer`, `short_answer`, `no_retrieved_chunks`, `runtime_error`
+- ChartQA: `exact_miss`, `relaxed_miss`, `image_missing`, `empty_prediction`, `runtime_error`
+
+## Ablation Study
+
+PaperVLM-Agent includes lightweight ablation scripts for checking how retrieval depth, RAG evidence, and visual inputs affect small-scale QA behavior. These experiments are designed for quick project reports and debugging; they are small-scale ablations, not full benchmark results.
+
+### Top-k Ablation
+
+Compare `top_k = 1, 3, 5, 10` on the self-built text RAG QA set. The default backend is `mock` to avoid unnecessary API cost:
+
+```powershell
+python scripts/run_ablation_topk.py --llm-backend mock
+```
+
+Outputs:
+
+```text
+data/eval/ablation/topk_ablation_results.json
+data/eval/ablation/topk_ablation_table.csv
+```
+
+### No-RAG vs Text-RAG Ablation
+
+Compare direct question answering without retrieved evidence against the existing text RAG pipeline:
+
+```powershell
+python scripts/run_ablation_rag.py
+```
+
+To run the pipeline without a qwen API call, use:
+
+```powershell
+python scripts/run_ablation_rag.py --llm-backend mock
+```
+
+Outputs:
+
+```text
+data/eval/ablation/rag_ablation_results.json
+data/eval/ablation/rag_ablation_table.csv
+```
+
+### Visual Input Ablation
+
+Compare `text_only`, `image_only`, and `text_image` modes on a small visual QA JSONL file:
+
+```powershell
+python scripts/run_ablation_visual.py
+```
+
+The default input file is:
+
+```text
+data/eval/example_visual_qa.jsonl
+```
+
+If this file does not exist, the script prints the expected JSONL fields and exits without calling the API. Outputs are written to:
+
+```text
+data/eval/ablation/visual_ablation_results.json
+data/eval/ablation/visual_ablation_table.csv
+```
 
 ## Netlify Frontend
 
@@ -252,5 +376,18 @@ To connect the Netlify frontend to a Python backend, set this Netlify environmen
 ```text
 VITE_PAPERVLM_API_BASE_URL=https://your-backend.example.com
 ```
+
+The backend in this repository can be started with:
+
+```powershell
+python scripts\run_api.py --host 0.0.0.0 --port 8000
+```
+
+It provides:
+
+- `GET /health`
+- `POST /api/process-pdf`
+- `POST /api/ask`
+- `POST /api/ask-visual`
 
 Keep `DASHSCOPE_API_KEY` only on the backend. Do not expose it in the Netlify frontend.

@@ -1,19 +1,27 @@
-"""Error analysis utilities for text RAG evaluation results."""
+"""Error analysis utilities for text RAG and ChartQA evaluation results."""
 
-from __future__ import annotations
-
-import csv
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from src.eval.io_utils import (
+    safe_rate as _safe_rate,
+    save_csv as _save_csv,
+    save_jsonl as _save_jsonl,
+)
+
+
+TASK_TYPES = {"text_rag", "chartqa"}
+
 
 def load_eval_results(path: str) -> dict[str, Any]:
-    """Load a text RAG evaluation result JSON file."""
+    """Load an evaluation result JSON file."""
     result_path = Path(path)
     if not result_path.exists():
         raise FileNotFoundError(f"Evaluation result file not found: {result_path}")
+    if not result_path.is_file():
+        raise ValueError(f"Evaluation result path is not a file: {result_path}")
 
     with result_path.open("r", encoding="utf-8") as file:
         data = json.load(file)
@@ -27,22 +35,14 @@ def load_eval_results(path: str) -> dict[str, Any]:
     return data
 
 
-def classify_error_case(result: dict[str, Any]) -> list[str]:
-    """Assign simple diagnostic labels to one evaluation result."""
+def classify_text_rag_error(result: dict[str, Any]) -> list[str]:
+    """Assign diagnostic labels to one text RAG evaluation result."""
     labels: list[str] = []
 
     if result.get("error"):
         labels.append("runtime_error")
-
     if result.get("page_hit") is False:
         labels.append("retrieval_miss")
-
-    model_answer = str(result.get("model_answer") or "")
-    answer_length = len(model_answer.strip())
-    if answer_length < 20:
-        labels.append("empty_answer")
-    elif answer_length <= 100:
-        labels.append("short_answer")
 
     retrieved_chunks = result.get("retrieved_chunks") or []
     if not retrieved_chunks:
@@ -52,116 +52,105 @@ def classify_error_case(result: dict[str, Any]) -> list[str]:
         if top_score is not None and top_score < 0.3:
             labels.append("low_top_score")
 
-    if not labels:
+    model_answer = str(result.get("model_answer") or "").strip()
+    if len(model_answer) < 20:
+        labels.append("empty_answer")
+    elif 20 <= len(model_answer) <= 100:
+        labels.append("short_answer")
+
+    severe_labels = {
+        "runtime_error",
+        "retrieval_miss",
+        "no_retrieved_chunks",
+        "empty_answer",
+        "low_top_score",
+    }
+    if not any(label in severe_labels for label in labels):
         labels.append("possible_success")
     return labels
 
 
-def build_case_records(eval_data: dict[str, Any]) -> list[dict[str, Any]]:
+def classify_chartqa_error(result: dict[str, Any]) -> list[str]:
+    """Assign diagnostic labels to one ChartQA evaluation result."""
+    labels: list[str] = []
+    error = str(result.get("error") or "")
+    error_lower = error.lower()
+
+    if error:
+        labels.append("runtime_error")
+    if "image not found" in error_lower or "file not found" in error_lower:
+        labels.append("image_missing")
+    if result.get("exact_match") is False:
+        labels.append("exact_miss")
+    if result.get("relaxed_match") is False:
+        labels.append("relaxed_miss")
+    if not str(result.get("prediction") or "").strip():
+        labels.append("empty_prediction")
+    if result.get("relaxed_match") is True and not error:
+        labels.append("possible_success")
+    return labels
+
+
+def classify_error_case(result: dict[str, Any]) -> list[str]:
+    """Backward-compatible text RAG error classifier."""
+    return classify_text_rag_error(result)
+
+
+def build_case_records(eval_data: dict[str, Any], task_type: str) -> list[dict[str, Any]]:
     """Flatten evaluation results into records suitable for tables."""
-    records: list[dict[str, Any]] = []
-    for result in eval_data["results"]:
-        if not isinstance(result, dict):
-            continue
-
-        retrieved_chunks = result.get("retrieved_chunks") or []
-        top_chunk = retrieved_chunks[0] if retrieved_chunks else {}
-        top_score = _safe_float(top_chunk.get("score")) if top_chunk else None
-        model_answer = str(result.get("model_answer") or "")
-        error_labels = classify_error_case(result)
-
-        records.append(
-            {
-                "id": result.get("id", ""),
-                "question_type": result.get("question_type", ""),
-                "question": result.get("question", ""),
-                "expected_pages": _format_list(result.get("expected_pages", [])),
-                "retrieved_pages": _format_list(result.get("retrieved_pages", [])),
-                "page_hit": bool(result.get("page_hit", False)),
-                "top_score": top_score,
-                "top_chunk_id": top_chunk.get("chunk_id", "") if top_chunk else "",
-                "answer_length": len(model_answer.strip()),
-                "error_labels": ";".join(error_labels),
-                "error": result.get("error", "") or "",
-            }
-        )
-    return records
+    _validate_task_type(task_type)
+    if task_type == "chartqa":
+        return [
+            _build_chartqa_record(result)
+            for result in eval_data["results"]
+            if isinstance(result, dict)
+        ]
+    return [
+        _build_text_rag_record(result)
+        for result in eval_data["results"]
+        if isinstance(result, dict)
+    ]
 
 
 def summarize_errors(case_records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize retrieval and answer-quality diagnostics."""
+    """Summarize retrieval, answer, and chart QA diagnostics."""
     total = len(case_records)
-    page_hit_count = sum(1 for record in case_records if record.get("page_hit"))
-    top_scores = [
-        float(record["top_score"])
-        for record in case_records
-        if record.get("top_score") is not None
-    ]
-    answer_lengths = [
-        int(record.get("answer_length", 0))
-        for record in case_records
-    ]
-
     label_counts: Counter[str] = Counter()
     for record in case_records:
         labels = str(record.get("error_labels", "")).split(";")
         label_counts.update(label for label in labels if label)
 
-    by_type_raw: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"total": 0, "page_hit_count": 0, "top_scores": []}
-    )
-    for record in case_records:
-        question_type = str(record.get("question_type") or "unknown")
-        stats = by_type_raw[question_type]
-        stats["total"] += 1
-        if record.get("page_hit"):
-            stats["page_hit_count"] += 1
-        if record.get("top_score") is not None:
-            stats["top_scores"].append(float(record["top_score"]))
-
-    by_question_type: dict[str, dict[str, Any]] = {}
-    for question_type, stats in by_type_raw.items():
-        type_total = stats["total"]
-        by_question_type[question_type] = {
-            "total": type_total,
-            "page_hit_count": stats["page_hit_count"],
-            "page_hit_rate": _safe_rate(stats["page_hit_count"], type_total),
-            "average_top_score": _average(stats["top_scores"]),
-        }
-
-    return {
+    summary: dict[str, Any] = {
         "total": total,
-        "page_hit_count": page_hit_count,
-        "page_hit_rate": _safe_rate(page_hit_count, total),
-        "average_top_score": _average(top_scores),
-        "average_answer_length": _average(answer_lengths),
         "error_label_counts": dict(sorted(label_counts.items())),
-        "by_question_type": by_question_type,
+        "by_question_type": {},
     }
+
+    if any("page_hit" in record for record in case_records):
+        page_hit_count = sum(1 for record in case_records if record.get("page_hit"))
+        summary["page_hit_count"] = page_hit_count
+        summary["page_hit_rate"] = _safe_rate(page_hit_count, total)
+
+    if any("exact_match" in record for record in case_records):
+        exact_count = sum(1 for record in case_records if record.get("exact_match"))
+        relaxed_count = sum(1 for record in case_records if record.get("relaxed_match"))
+        summary["exact_match_count"] = exact_count
+        summary["exact_match_rate"] = _safe_rate(exact_count, total)
+        summary["relaxed_match_count"] = relaxed_count
+        summary["relaxed_match_rate"] = _safe_rate(relaxed_count, total)
+
+    summary["by_question_type"] = _summarize_by_question_type(case_records)
+    return summary
 
 
 def save_jsonl(records: list[dict[str, Any]], path: str) -> Path:
     """Save records as UTF-8 JSONL."""
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as file:
-        for record in records:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return output_path
+    return _save_jsonl(records, path)
 
 
 def save_csv(records: list[dict[str, Any]], path: str) -> Path:
     """Save records as CSV."""
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(records[0].keys()) if records else []
-
-    with output_path.open("w", encoding="utf-8-sig", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        if fieldnames:
-            writer.writeheader()
-            writer.writerows(records)
-    return output_path
+    return _save_csv(records, path)
 
 
 def save_summary_markdown(
@@ -178,23 +167,27 @@ def save_summary_markdown(
         "",
         "## Overall Metrics",
         "",
-        f"- Total examples: {summary['total']}",
-        f"- Page hit count: {summary['page_hit_count']}",
-        f"- Page hit rate: {summary['page_hit_rate']:.4f}",
-        f"- Average top retrieval score: {summary['average_top_score']:.4f}",
-        f"- Average answer length: {summary['average_answer_length']:.2f}",
-        "",
-        "## Metrics by Question Type",
-        "",
-        "| Question type | Total | Page hit count | Page hit rate | Average top score |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        f"- Total examples: {summary.get('total', 0)}",
     ]
-
-    for question_type, stats in summary["by_question_type"].items():
-        lines.append(
-            f"| {question_type} | {stats['total']} | {stats['page_hit_count']} | "
-            f"{stats['page_hit_rate']:.4f} | {stats['average_top_score']:.4f} |"
+    if "page_hit_rate" in summary:
+        lines.extend(
+            [
+                f"- Page hit count: {summary.get('page_hit_count', 0)}",
+                f"- Page hit rate: {summary.get('page_hit_rate', 0.0):.4f}",
+            ]
         )
+    if "exact_match_rate" in summary:
+        lines.extend(
+            [
+                f"- Exact match count: {summary.get('exact_match_count', 0)}",
+                f"- Exact match rate: {summary.get('exact_match_rate', 0.0):.4f}",
+                f"- Relaxed match count: {summary.get('relaxed_match_count', 0)}",
+                f"- Relaxed match rate: {summary.get('relaxed_match_rate', 0.0):.4f}",
+            ]
+        )
+
+    lines.extend(["", "## Metrics by Question Type", ""])
+    lines.extend(_markdown_by_type_table(summary.get("by_question_type", {})))
 
     lines.extend(
         [
@@ -205,7 +198,7 @@ def save_summary_markdown(
             "| --- | ---: |",
         ]
     )
-    for label, count in summary["error_label_counts"].items():
+    for label, count in summary.get("error_label_counts", {}).items():
         lines.append(f"| {label} | {count} |")
 
     lines.extend(["", "## Representative Error Cases", ""])
@@ -218,16 +211,7 @@ def save_summary_markdown(
         lines.append("- No representative error cases were found.")
     else:
         for record in error_cases:
-            lines.extend(
-                [
-                    f"- `{record['id']}` ({record['question_type']}): {record['question']}",
-                    f"  - Labels: {record['error_labels']}",
-                    f"  - Expected pages: {record['expected_pages']}; retrieved pages: {record['retrieved_pages']}",
-                    f"  - Top chunk: {record['top_chunk_id']}; top score: {_format_score(record['top_score'])}",
-                ]
-            )
-            if record.get("error"):
-                lines.append(f"  - Runtime error: {record['error']}")
+            lines.extend(_format_error_case(record))
 
     lines.extend(
         [
@@ -235,16 +219,9 @@ def save_summary_markdown(
             "## Notes for Report",
             "",
             (
-                "English: The evaluation focuses on retrieval grounding. "
-                f"The current page hit rate is {summary['page_hit_rate']:.2%}, "
-                "and error labels help identify retrieval misses, weak evidence, "
-                "short answers, and runtime failures."
-            ),
-            "",
-            (
-                "中文：当前评测重点关注 RAG 检索是否命中参考页码。"
-                f"本次 page hit rate 为 {summary['page_hit_rate']:.2%}，"
-                "错误标签可用于定位检索未命中、证据分数较低、回答过短和运行失败等问题。"
+                "These artifacts provide traceable evidence for retrieval, "
+                "answer generation, chart QA accuracy, and error categories. "
+                "They can be summarized in README files, reports, and experiment tables."
             ),
             "",
         ]
@@ -256,11 +233,13 @@ def save_summary_markdown(
 
 def run_error_analysis(
     eval_result_path: str,
+    task_type: str,
     output_dir: str = "data/eval/analysis",
 ) -> dict[str, Any]:
     """Run error analysis and save report/table artifacts."""
+    _validate_task_type(task_type)
     eval_data = load_eval_results(eval_result_path)
-    case_records = build_case_records(eval_data)
+    case_records = build_case_records(eval_data, task_type)
     summary = summarize_errors(case_records)
 
     output_root = Path(output_dir)
@@ -286,8 +265,139 @@ def run_error_analysis(
     }
 
 
+def _build_text_rag_record(result: dict[str, Any]) -> dict[str, Any]:
+    """Build one flattened text RAG error-analysis record."""
+    retrieved_chunks = result.get("retrieved_chunks") or []
+    top_chunk = retrieved_chunks[0] if retrieved_chunks else {}
+    top_score = _safe_float(top_chunk.get("score")) if top_chunk else None
+    model_answer = str(result.get("model_answer") or "")
+    error_labels = classify_text_rag_error(result)
+
+    return {
+        "id": result.get("id", ""),
+        "task_type": "text_rag",
+        "question_type": result.get("question_type", ""),
+        "question": result.get("question", ""),
+        "expected_pages": _format_list(result.get("expected_pages", [])),
+        "retrieved_pages": _format_list(result.get("retrieved_pages", [])),
+        "page_hit": bool(result.get("page_hit", False)),
+        "top_score": top_score,
+        "top_chunk_id": top_chunk.get("chunk_id", "") if top_chunk else "",
+        "answer_length": len(model_answer.strip()),
+        "model_answer": model_answer,
+        "error_labels": ";".join(error_labels),
+        "error": result.get("error", "") or "",
+    }
+
+
+def _build_chartqa_record(result: dict[str, Any]) -> dict[str, Any]:
+    """Build one flattened ChartQA error-analysis record."""
+    prediction = str(result.get("prediction") or "")
+    error_labels = classify_chartqa_error(result)
+
+    return {
+        "id": result.get("id", ""),
+        "task_type": "chartqa",
+        "question_type": result.get("question_type", ""),
+        "image_path": result.get("image_path", ""),
+        "question": result.get("question", ""),
+        "ground_truth": result.get("ground_truth", ""),
+        "prediction": prediction,
+        "prediction_length": len(prediction.strip()),
+        "exact_match": bool(result.get("exact_match", False)),
+        "relaxed_match": bool(result.get("relaxed_match", False)),
+        "error_labels": ";".join(error_labels),
+        "error": result.get("error", "") or "",
+    }
+
+
+def _summarize_by_question_type(case_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize metrics grouped by question type."""
+    raw: dict[str, dict[str, Any]] = defaultdict(lambda: defaultdict(int))
+    for record in case_records:
+        question_type = str(record.get("question_type") or "unknown")
+        stats = raw[question_type]
+        stats["total"] += 1
+        if record.get("page_hit"):
+            stats["page_hit_count"] += 1
+        if record.get("exact_match"):
+            stats["exact_match_count"] += 1
+        if record.get("relaxed_match"):
+            stats["relaxed_match_count"] += 1
+
+    by_type: dict[str, dict[str, Any]] = {}
+    for question_type, stats in raw.items():
+        total = int(stats["total"])
+        row: dict[str, Any] = {"total": total}
+        if any("page_hit" in record for record in case_records):
+            row["page_hit_count"] = int(stats["page_hit_count"])
+            row["page_hit_rate"] = _safe_rate(row["page_hit_count"], total)
+        if any("exact_match" in record for record in case_records):
+            row["exact_match_count"] = int(stats["exact_match_count"])
+            row["exact_match_rate"] = _safe_rate(row["exact_match_count"], total)
+            row["relaxed_match_count"] = int(stats["relaxed_match_count"])
+            row["relaxed_match_rate"] = _safe_rate(row["relaxed_match_count"], total)
+        by_type[question_type] = row
+    return by_type
+
+
+def _markdown_by_type_table(by_type: dict[str, Any]) -> list[str]:
+    """Build a Markdown table for per-type metrics."""
+    if not by_type:
+        return ["No question-type metrics available."]
+
+    metric_keys = sorted(
+        {
+            key
+            for stats in by_type.values()
+            for key in stats
+            if key != "total"
+        }
+    )
+    header = ["Question type", "Total", *metric_keys]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---", "---:", *["---:" for _ in metric_keys]]) + " |",
+    ]
+    for question_type, stats in by_type.items():
+        values = [question_type, str(stats.get("total", 0))]
+        values.extend(_format_metric(stats.get(key, "")) for key in metric_keys)
+        lines.append("| " + " | ".join(values) + " |")
+    return lines
+
+
+def _format_error_case(record: dict[str, Any]) -> list[str]:
+    """Format one representative error case for Markdown."""
+    lines = [
+        f"- `{record.get('id', '')}` ({record.get('question_type', '')}): "
+        f"{record.get('question', '')}",
+        f"  - Labels: {record.get('error_labels', '')}",
+    ]
+    if record.get("task_type") == "text_rag":
+        lines.append(
+            "  - Expected pages: "
+            f"{record.get('expected_pages', '')}; "
+            f"retrieved pages: {record.get('retrieved_pages', '')}"
+        )
+        lines.append(
+            "  - Top chunk: "
+            f"{record.get('top_chunk_id', '')}; "
+            f"top score: {_format_metric(record.get('top_score', ''))}"
+        )
+    if record.get("task_type") == "chartqa":
+        lines.append(
+            "  - Ground truth: "
+            f"{record.get('ground_truth', '')}; "
+            f"prediction: {record.get('prediction', '')}"
+        )
+        lines.append(f"  - Image: {record.get('image_path', '')}")
+    if record.get("error"):
+        lines.append(f"  - Runtime error: {record['error']}")
+    return lines
+
+
 def _analysis_base_name(stem: str) -> str:
-    """Strip the run_eval_text_rag suffix from result file stems."""
+    """Strip the result suffix from result file stems."""
     if stem.endswith("_results"):
         return stem[: -len("_results")]
     return stem
@@ -295,16 +405,18 @@ def _analysis_base_name(stem: str) -> str:
 
 def _by_type_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
     """Convert by-type metrics to CSV rows."""
-    return [
-        {
-            "question_type": question_type,
-            "total": stats["total"],
-            "page_hit_count": stats["page_hit_count"],
-            "page_hit_rate": stats["page_hit_rate"],
-            "average_top_score": stats["average_top_score"],
-        }
-        for question_type, stats in summary["by_question_type"].items()
-    ]
+    records: list[dict[str, Any]] = []
+    for question_type, stats in summary.get("by_question_type", {}).items():
+        record = {"question_type": question_type}
+        record.update(stats)
+        records.append(record)
+    return records
+
+
+def _validate_task_type(task_type: str) -> None:
+    """Validate supported task types."""
+    if task_type not in TASK_TYPES:
+        raise ValueError("task_type must be either 'text_rag' or 'chartqa'.")
 
 
 def _safe_float(value: Any) -> float | None:
@@ -314,21 +426,6 @@ def _safe_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
 
-
-def _safe_rate(numerator: int, denominator: int) -> float:
-    """Compute a rate while handling empty denominators."""
-    if denominator == 0:
-        return 0.0
-    return numerator / denominator
-
-
-def _average(values: list[float] | list[int]) -> float:
-    """Compute an average while handling empty lists."""
-    if not values:
-        return 0.0
-    return float(sum(values) / len(values))
-
-
 def _format_list(value: Any) -> str:
     """Format list-like values as a compact semicolon-separated string."""
     if isinstance(value, list):
@@ -336,9 +433,8 @@ def _format_list(value: Any) -> str:
     return str(value)
 
 
-def _format_score(value: Any) -> str:
-    """Format a score value for Markdown output."""
-    score = _safe_float(value)
-    if score is None:
-        return ""
-    return f"{score:.4f}"
+def _format_metric(value: Any) -> str:
+    """Format a metric value for Markdown output."""
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)

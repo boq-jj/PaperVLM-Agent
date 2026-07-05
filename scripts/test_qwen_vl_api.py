@@ -3,16 +3,10 @@
 import argparse
 import os
 import sys
-from pathlib import Path
 
+from _bootstrap import bootstrap_project
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+bootstrap_project()
 
 from src.llm.qwen_vl_api import (  # noqa: E402
     DEFAULT_DASHSCOPE_BASE_URL,

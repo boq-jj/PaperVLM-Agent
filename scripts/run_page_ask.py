@@ -1,43 +1,12 @@
 """Command-line entrypoint for visual page or figure RAG QA."""
 
 import argparse
-import os
-import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
+from _bootstrap import bootstrap_project, default_bge_model
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
-
-
-def _ensure_project_python() -> None:
-    """Restart with the project virtual environment when available."""
-    if not PROJECT_VENV_PYTHON.exists():
-        return
-
-    current_python = Path(sys.executable).resolve()
-    project_python = PROJECT_VENV_PYTHON.resolve()
-    if current_python == project_python:
-        return
-    if os.environ.get("PAPERVLM_SKIP_PYTHON_REEXEC") == "1":
-        return
-
-    env = os.environ.copy()
-    env["PAPERVLM_SKIP_PYTHON_REEXEC"] = "1"
-    command = [str(project_python), str(Path(__file__).resolve()), *sys.argv[1:]]
-    raise SystemExit(subprocess.call(command, env=env))
-
-
-_ensure_project_python()
-
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+bootstrap_project(reexec_venv=True)
 
 from src.agent.vision_answer import (  # noqa: E402
     DEFAULT_INDEX_DIR,
@@ -50,10 +19,7 @@ from src.agent.vision_answer import (  # noqa: E402
 
 def default_retriever_model() -> str:
     """Prefer local fallback BGE model if available."""
-    local_model = PROJECT_ROOT / "models" / "bge-small-en-v1.5-hf-mirror"
-    if local_model.exists():
-        return str(local_model.relative_to(PROJECT_ROOT))
-    return DEFAULT_RETRIEVER_MODEL
+    return default_bge_model(DEFAULT_RETRIEVER_MODEL)
 
 
 def parse_args() -> argparse.Namespace:

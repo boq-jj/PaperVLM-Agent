@@ -1,6 +1,5 @@
 """Gradio demo for PaperVLM-Agent."""
 
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +7,13 @@ import gradio as gr
 
 from src.agent.answer import ask_with_rag
 from src.agent.vision_answer import ask_with_visual_rag
+from src.app.upload_utils import (
+    coerce_non_negative_float,
+    coerce_non_negative_int,
+    coerce_positive_int,
+    copy_uploaded_file,
+    resolve_uploaded_file,
+)
 from src.pdf.parse_pdf import parse_pdf
 from src.rag.build_index import build_index_from_chunks
 from src.rag.chunk_text import chunk_parsed_pdf
@@ -21,6 +27,7 @@ INDEX_DIR = Path("data/extracted/faiss_index")
 UPLOADED_IMAGES_DIR = Path("data/extracted/uploaded_images")
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_LLM_MODEL = "qwen3-vl-flash"
+SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 APP_CSS = """
 .gradio-container {
     background: #f6f5f1;
@@ -125,23 +132,6 @@ APP_CSS = """
 """
 
 
-def safe_filename(filename: str) -> str:
-    """Return a safe file name without any parent directory."""
-    name = Path(filename or "").name.strip()
-    if not name:
-        return "uploaded_paper.pdf"
-
-    safe_chars = []
-    for char in name:
-        if char.isalnum() or char in {"-", "_", ".", " "}:
-            safe_chars.append(char)
-        else:
-            safe_chars.append("_")
-
-    safe_name = "".join(safe_chars).strip(" .")
-    return safe_name or "uploaded_paper.pdf"
-
-
 def default_embedding_model() -> str:
     """Prefer the local mirror-downloaded BGE model if it exists."""
     local_model = Path("models/bge-small-en-v1.5-hf-mirror")
@@ -150,19 +140,12 @@ def default_embedding_model() -> str:
     return DEFAULT_EMBEDDING_MODEL
 
 
-def _get_uploaded_file_path(pdf_file: Any) -> Path:
-    """Resolve a Gradio uploaded file object to a local path."""
-    if pdf_file is None:
-        raise ValueError("请先上传 PDF 文件。")
-
-    if isinstance(pdf_file, str):
-        return Path(pdf_file)
-
-    file_name = getattr(pdf_file, "name", None)
-    if file_name:
-        return Path(file_name)
-
-    raise ValueError("不支持的上传文件对象。")
+def _normalize_embedding_model(embedding_model: str) -> str:
+    """Normalize an embedding model input from the UI."""
+    model_name = (embedding_model or default_embedding_model()).strip()
+    if not model_name:
+        raise ValueError("embedding_model 不能为空。")
+    return model_name
 
 
 def _copy_uploaded_image(image_file: Any) -> str:
@@ -170,20 +153,12 @@ def _copy_uploaded_image(image_file: Any) -> str:
     if image_file is None:
         return ""
 
-    if isinstance(image_file, str):
-        source_path = Path(image_file)
-    else:
-        file_name = getattr(image_file, "name", None)
-        if not file_name:
-            raise ValueError("不支持的上传图片对象。")
-        source_path = Path(file_name)
-
-    if source_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
-        raise ValueError("仅支持 png、jpg、jpeg 和 webp 图片。")
-
-    UPLOADED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    target_path = UPLOADED_IMAGES_DIR / safe_filename(source_path.name)
-    shutil.copy2(source_path, target_path)
+    source_path = resolve_uploaded_file(image_file, "请先上传图片文件。")
+    target_path = copy_uploaded_file(
+        source_path=source_path,
+        target_dir=UPLOADED_IMAGES_DIR,
+        suffixes=SUPPORTED_IMAGE_SUFFIXES,
+    )
     return str(target_path)
 
 
@@ -195,27 +170,13 @@ def process_pdf_for_demo(
 ) -> tuple[str, str, str]:
     """Parse an uploaded PDF, build chunks, and create a FAISS index."""
     try:
-        source_path = _get_uploaded_file_path(pdf_file)
-        if source_path.suffix.lower() != ".pdf":
-            raise ValueError("仅支持 PDF 文件。")
-
-        chunk_size = int(chunk_size)
-        chunk_overlap = int(chunk_overlap)
-        if chunk_size <= 0:
-            raise ValueError("chunk_size 必须大于 0。")
-        if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        source_path = resolve_uploaded_file(pdf_file, "请先上传 PDF 文件。")
+        chunk_size = coerce_positive_int(chunk_size, "chunk_size")
+        chunk_overlap = coerce_non_negative_int(chunk_overlap, "chunk_overlap")
+        if chunk_overlap >= chunk_size:
             raise ValueError("chunk_overlap 必须大于等于 0，并且小于 chunk_size。")
-
-        embedding_model = (embedding_model or DEFAULT_EMBEDDING_MODEL).strip()
-        if not embedding_model:
-            raise ValueError("embedding_model 不能为空。")
-
-        RAW_PAPERS_DIR.mkdir(parents=True, exist_ok=True)
-        target_name = safe_filename(source_path.name)
-        if not target_name.lower().endswith(".pdf"):
-            target_name = f"{Path(target_name).stem}.pdf"
-        target_path = RAW_PAPERS_DIR / target_name
-        shutil.copy2(source_path, target_path)
+        embedding_model = _normalize_embedding_model(embedding_model)
+        target_path = copy_uploaded_file(source_path, RAW_PAPERS_DIR, {".pdf"})
 
         parsed_pdf = parse_pdf(
             pdf_path=str(target_path),
@@ -329,7 +290,13 @@ def ask_question_for_demo(
         if not question:
             raise ValueError("请输入问题。")
 
-        retriever_model_name = (retriever_model_name or default_embedding_model()).strip()
+        retriever_model_name = (
+            retriever_model_name or default_embedding_model()
+        ).strip()
+        top_k = coerce_positive_int(top_k, "top_k")
+        max_context_chars = coerce_positive_int(max_context_chars, "max_context_chars")
+        max_new_tokens = coerce_positive_int(max_new_tokens, "max_new_tokens")
+        temperature = coerce_non_negative_float(temperature, "temperature")
 
         result = ask_with_rag(
             question=question,
@@ -338,10 +305,10 @@ def ask_question_for_demo(
             retriever_model_name=retriever_model_name,
             llm_backend=llm_backend,
             llm_model_name=llm_model_name or DEFAULT_LLM_MODEL,
-            top_k=int(top_k),
-            max_context_chars=int(max_context_chars),
-            max_new_tokens=int(max_new_tokens),
-            temperature=float(temperature),
+            top_k=top_k,
+            max_context_chars=max_context_chars,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
             answer_language=answer_language,
         )
 
@@ -371,7 +338,16 @@ def ask_visual_question_for_demo(
         if not question:
             raise ValueError("请输入视觉问答问题。")
 
-        retriever_model_name = (retriever_model_name or default_embedding_model()).strip()
+        retriever_model_name = (
+            retriever_model_name or default_embedding_model()
+        ).strip()
+        top_k = coerce_positive_int(top_k, "visual_top_k")
+        max_context_chars = coerce_positive_int(
+            max_context_chars,
+            "visual_max_context_chars",
+        )
+        max_new_tokens = coerce_positive_int(max_new_tokens, "visual_max_new_tokens")
+        temperature = coerce_non_negative_float(temperature, "visual_temperature")
         image_path = _copy_uploaded_image(image_file)
 
         result = ask_with_visual_rag(
@@ -381,10 +357,10 @@ def ask_visual_question_for_demo(
             index_dir=str(INDEX_DIR),
             retriever_model_name=retriever_model_name,
             llm_model_name=DEFAULT_LLM_MODEL,
-            top_k=int(top_k),
-            max_context_chars=int(max_context_chars),
-            max_new_tokens=int(max_new_tokens),
-            temperature=float(temperature),
+            top_k=top_k,
+            max_context_chars=max_context_chars,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
             answer_language=answer_language,
         )
 

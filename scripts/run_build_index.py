@@ -2,17 +2,11 @@
 
 import argparse
 import sys
-from pathlib import Path
 from typing import Any
 
+from _bootstrap import bootstrap_project
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+bootstrap_project()
 
 from src.rag.build_index import DEFAULT_EMBEDDING_MODEL, build_index_from_chunks  # noqa: E402
 

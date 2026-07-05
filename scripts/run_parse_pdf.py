@@ -5,10 +5,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from _bootstrap import bootstrap_project
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+bootstrap_project()
 
 from src.pdf.parse_pdf import parse_pdf  # noqa: E402
 

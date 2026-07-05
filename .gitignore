@@ -24,6 +24,7 @@ build/
 frontend/node_modules/
 frontend/dist/
 frontend/.npm-cache/
+frontend/*.tsbuildinfo
 .netlify/
 .vite/
 
@@ -53,6 +54,8 @@ data/raw_papers/*
 data/datasets/*
 data/extracted/*
 data/eval/*
+!data/eval/example_text_qa.jsonl
+!data/eval/chartqa_sample.jsonl
 
 # PDF and archive files
 *.pdf
@@ -67,6 +70,9 @@ data/eval/*
 *.index
 cache/
 .cache/
+.hf_cache/
+.hf_datasets_cache/
+.deps_wheels/
 outputs/
 logs/
 *.log

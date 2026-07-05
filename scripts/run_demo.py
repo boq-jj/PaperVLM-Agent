@@ -1,42 +1,10 @@
 """Command-line entrypoint for launching the Gradio demo."""
 
 import argparse
-import os
-import subprocess
-import sys
-from pathlib import Path
 
+from _bootstrap import bootstrap_project
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
-
-
-def _ensure_project_python() -> None:
-    """Restart with the project virtual environment when available."""
-    if not PROJECT_VENV_PYTHON.exists():
-        return
-
-    current_python = Path(sys.executable).resolve()
-    project_python = PROJECT_VENV_PYTHON.resolve()
-    if current_python == project_python:
-        return
-    if os.environ.get("PAPERVLM_SKIP_PYTHON_REEXEC") == "1":
-        return
-
-    env = os.environ.copy()
-    env["PAPERVLM_SKIP_PYTHON_REEXEC"] = "1"
-    command = [str(project_python), str(Path(__file__).resolve()), *sys.argv[1:]]
-    raise SystemExit(subprocess.call(command, env=env))
-
-
-_ensure_project_python()
-
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+bootstrap_project(reexec_venv=True)
 
 from src.app.gradio_app import APP_CSS, build_demo  # noqa: E402
 

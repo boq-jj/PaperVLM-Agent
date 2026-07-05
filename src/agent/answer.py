@@ -152,6 +152,7 @@ def summarize_retrieval_results(
 def ask_with_rag(
     question: str,
     paper_id: str,
+    retrieval_query: str | None = None,
     index_dir: str = DEFAULT_INDEX_DIR,
     retriever_model_name: str = DEFAULT_RETRIEVER_MODEL,
     llm_backend: str = "qwen-vl",
@@ -168,6 +169,8 @@ def ask_with_rag(
     Args:
         question: User question.
         paper_id: Paper ID used to locate index and metadata files.
+        retrieval_query: Optional query used only for retrieval. If omitted,
+            the user-facing question is used for retrieval.
         index_dir: Directory containing FAISS index files.
         retriever_model_name: SentenceTransformer model name or local path.
         llm_backend: LLM backend name, either ``qwen-vl`` or ``mock``.
@@ -186,7 +189,7 @@ def ask_with_rag(
     metadata_path = index_root / f"{paper_id}_metadata.json"
 
     retrieved_chunks = retrieve(
-        query=question,
+        query=retrieval_query or question,
         index_path=str(index_path),
         metadata_path=str(metadata_path),
         model_name=retriever_model_name,

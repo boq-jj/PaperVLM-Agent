@@ -1,6 +1,7 @@
 """Build embedding vectors and FAISS indexes for paper chunks."""
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ def load_chunks(chunks_path: str) -> dict[str, Any]:
     return chunks_data
 
 
+@lru_cache(maxsize=4)
 def load_embedding_model(model_name: str = DEFAULT_EMBEDDING_MODEL) -> SentenceTransformer:
     """Load a SentenceTransformer embedding model."""
     try:
